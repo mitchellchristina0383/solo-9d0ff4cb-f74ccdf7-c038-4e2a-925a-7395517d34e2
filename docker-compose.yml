@@ -1,0 +1,32 @@
+name: release-notify
+
+services:
+  receiver:
+    build: ./receiver
+    container_name: rn-receiver
+    ports:
+      - "8001:8001"
+    environment:
+      DB_PATH: /data/receiver.db
+    volumes:
+      - receiver_data:/data
+    restart: unless-stopped
+
+  sender:
+    build: ./sender
+    container_name: rn-sender
+    ports:
+      - "8000:8000"
+    environment:
+      DB_PATH: /data/sender.db
+      RECEIVER_URL: http://receiver:8001
+      HTTP_TIMEOUT: "3"
+    volumes:
+      - sender_data:/data
+    depends_on:
+      - receiver
+    restart: unless-stopped
+
+volumes:
+  receiver_data:
+  sender_data:

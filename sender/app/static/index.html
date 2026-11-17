@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>发布值班台 · 部署完成通知</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; background: #f4f6f8; color: #1f2933; }
+  header { background: #1f2933; color: #fff; padding: 14px 24px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header p { margin: 4px 0 0; font-size: 12px; color: #9aa5b1; }
+  header a { color: #7fd1ff; }
+  main { max-width: 1100px; margin: 20px auto; padding: 0 16px; }
+  .card { background: #fff; border: 1px solid #e4e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  label { font-size: 13px; color: #52606d; display: block; margin-bottom: 10px; }
+  input[type=text], select { width: 100%; padding: 7px 9px; border: 1px solid #cbd2d9; border-radius: 6px; font-size: 14px; margin-top: 3px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > label { flex: 1; min-width: 140px; }
+  button { background: #0967d2; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  button.ghost { background: #e4e7eb; color: #1f2933; }
+  button.small { padding: 4px 10px; font-size: 12px; }
+  button:hover { filter: brightness(1.08); }
+  #msg { margin-top: 10px; font-size: 13px; padding: 8px 10px; border-radius: 6px; display: none; }
+  #msg.ok { display: block; background: #e3f2e9; color: #1c7c43; }
+  #msg.err { display: block; background: #fdecea; color: #c0392b; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #eef1f4; vertical-align: top; }
+  th { color: #7b8794; font-weight: 600; white-space: nowrap; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
+  .b-PENDING { background: #e4e7eb; color: #52606d; }
+  .b-UNCERTAIN { background: #fff3cd; color: #8a6d1a; }
+  .b-ACKED { background: #d9f2e3; color: #1c7c43; }
+  .b-CONFLICT { background: #fdecea; color: #c0392b; }
+  .muted { color: #9aa5b1; font-size: 12px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .err-text { color: #c0392b; font-size: 12px; max-width: 220px; word-break: break-all; }
+</style>
+</head>
+<body>
+<header>
+  <h1>发布值班台 · 部署完成通知（发送端）</h1>
+  <p>仅凭接收端回执确认送达；丢回执 / 接收端不可达 / 本端重启后保持「待核」，可核对补账，绝不虚报成功。
+     接收端台账：<a href="http://localhost:8001" target="_blank">http://localhost:8001</a></p>
+</header>
+<main>
+  <section class="card">
+    <h2>登记并发送通知</h2>
+    <form id="form">
+      <div class="row">
+        <label>环境<input type="text" id="env" value="prod" required maxlength="64"></label>
+        <label>发布号<input type="text" id="release_no" placeholder="如 R2026-001" required maxlength="64"></label>
+        <label>结果
+          <select id="result">
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+            <option value="rolled_back">已回滚</option>
+          </select>
+        </label>
+      </div>
+      <label style="display:flex;align-items:center;gap:6px">
+        <input type="checkbox" id="sim"> 模拟接收端故障：入库后丢失响应（演示「待核 → 核对」流程）
+      </label>
+      <button type="submit">提交并发送</button>
+      <div id="msg"></div>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="toolbar">
+      <h2 style="margin:0;flex:1">通知记录</h2>
+      <button class="ghost small" id="btn-refresh">刷新</button>
+      <button class="ghost small" id="btn-reconcile-all">核对全部待核</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>环境</th><th>发布号</th><th>结果</th><th>状态</th><th>尝试</th><th>回执</th><th>最近错误</th><th>更新时间 (UTC)</th><th>操作</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+const STATUS_LABEL = { PENDING: "待发送", UNCERTAIN: "待核", ACKED: "已确认", CONFLICT: "冲突" };
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  return { status: r.status, data };
+}
+
+function showMsg(text, ok) {
+  const el = document.getElementById("msg");
+  el.textContent = text;
+  el.className = ok ? "ok" : "err";
+}
+
+function report(d) {
+  if (!d || !d.status) { showMsg("操作失败", false); return; }
+  if (d.status === "ACKED") showMsg("已确认送达（回执 #" + (d.receipt_id ?? "?") + "）", true);
+  else if (d.status === "CONFLICT") showMsg("冲突：" + (d.last_error || "内容不一致"), false);
+  else if (d.status === "UNCERTAIN") showMsg("未拿到回执，状态=待核：" + (d.last_error || ""), false);
+  else showMsg((d.note ? d.note + "；" : "") + "当前状态：" + (STATUS_LABEL[d.status] || d.status), true);
+}
+
+async function load() {
+  const { data } = await api("/api/notifications");
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = "";
+  for (const n of (data.items || [])) {
+    const tr = document.createElement("tr");
+    const receipt = n.receipt_id ? "#" + n.receipt_id : "—";
+    tr.innerHTML =
+      "<td>" + n.id + "</td><td>" + esc(n.env) + "</td><td>" + esc(n.release_no) + "</td>" +
+      "<td>" + esc(n.result) + "</td>" +
+      '<td><span class="badge b-' + n.status + '">' + (STATUS_LABEL[n.status] || n.status) + "</span></td>" +
+      "<td>" + n.attempt_count + "</td><td>" + receipt + "</td>" +
+      '<td class="err-text">' + esc(n.last_error || "") + "</td>" +
+      '<td class="muted">' + esc(n.updated_at || "") + "</td>" +
+      '<td><button class="small" data-act="send">发送/重试</button> ' +
+      '<button class="small ghost" data-act="reconcile">核对</button></td>';
+    tr.querySelector('[data-act="send"]').onclick = async () => {
+      report((await api(`/api/notifications/${n.id}/send`, { method: "POST" })).data); load();
+    };
+    tr.querySelector('[data-act="reconcile"]').onclick = async () => {
+      report((await api(`/api/notifications/${n.id}/reconcile`, { method: "POST" })).data); load();
+    };
+    tbody.appendChild(tr);
+  }
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+document.getElementById("form").onsubmit = async (e) => {
+  e.preventDefault();
+  const body = {
+    env: document.getElementById("env").value,
+    release_no: document.getElementById("release_no").value,
+    result: document.getElementById("result").value,
+  };
+  const c = await api("/api/notifications", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  if (c.status === 409) { showMsg("冲突：" + (c.data.detail || "已存在不同内容"), false); load(); return; }
+  if (c.status >= 400) { showMsg("登记失败：" + (c.data.detail || c.status), false); return; }
+  const sim = document.getElementById("sim").checked ? "?simulate=lose_response" : "";
+  const s = await api(`/api/notifications/${c.data.id}/send${sim}`, { method: "POST" });
+  report(s.data);
+  load();
+};
+
+document.getElementById("btn-refresh").onclick = load;
+document.getElementById("btn-reconcile-all").onclick = async () => {
+  await api("/api/reconcile-all", { method: "POST" }); load();
+};
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

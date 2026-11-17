@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>审计接收端 · 回执台账</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; background: #f4f6f8; color: #1f2933; }
+  header { background: #3e4c59; color: #fff; padding: 14px 24px; }
+  header h1 { font-size: 18px; margin: 0; }
+  header p { margin: 4px 0 0; font-size: 12px; color: #cbd2d9; }
+  main { max-width: 980px; margin: 20px auto; padding: 0 16px; }
+  .card { background: #fff; border: 1px solid #e4e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #eef1f4; }
+  th { color: #7b8794; font-weight: 600; }
+  code { background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .muted { color: #9aa5b1; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>审计接收端 · 回执台账</h1>
+  <p>相同「环境+发布号」的同内容重试只记一次；内容不同返回 409 冲突。本页每 3 秒自动刷新。</p>
+</header>
+<main>
+  <section class="card">
+    <p class="muted">
+      接口：<code>POST /api/receipts</code>（body 可带 <code>"simulate":"lose_response"</code> 模拟入库后丢响应，
+      或 <code>"slow"</code> 模拟慢回执）· <code>GET /api/receipts?env=...&amp;release_no=...</code> 查询回执
+    </p>
+    <table>
+      <thead><tr><th>ID</th><th>环境</th><th>发布号</th><th>结果</th><th>入账时间 (UTC)</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+async function load() {
+  const r = await fetch("/api/receipts");
+  const data = await r.json();
+  const tbody = document.getElementById("rows");
+  tbody.innerHTML = "";
+  for (const n of (data.items || [])) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = "<td>" + n.id + "</td><td>" + esc(n.env) + "</td><td>" + esc(n.release_no) +
+      "</td><td>" + esc(n.result) + "</td><td class='muted'>" + esc(n.received_at) + "</td>";
+    tbody.appendChild(tr);
+  }
+}
+load();
+setInterval(load, 3000);
+</script>
+</body>
+</html>
