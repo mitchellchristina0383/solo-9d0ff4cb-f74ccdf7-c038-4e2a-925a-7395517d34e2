@@ -15,7 +15,8 @@ LOG_DIR="${LOG_DIR:-/tmp/rn-logs}"
 mkdir -p "$DATA_DIR" "$LOG_DIR"
 
 start_receiver() {
-  DB_PATH="$DATA_DIR/receiver.db" nohup "$PY" -m uvicorn app.main:app \
+  DB_PATH="$DATA_DIR/receiver.db" ARCHIVE_DB_PATH="$DATA_DIR/archive.db" \
+    nohup "$PY" -m uvicorn app.main:app \
     --host 127.0.0.1 --port 8001 --app-dir "$ROOT/receiver" \
     >>"$LOG_DIR/receiver.log" 2>&1 &
 }
@@ -32,6 +33,9 @@ case "${1:-}" in
   stop-all) stop_receiver; stop_sender ;;
   stop-receiver) stop_receiver ;;
   start-receiver) start_receiver ;;
+  restart-receiver) stop_receiver; sleep 1; start_receiver ;;
+  stop-sender) stop_sender ;;
+  start-sender) start_sender ;;
   restart-sender) stop_sender; sleep 1; start_sender ;;
   clean) stop_receiver; stop_sender; rm -rf "$DATA_DIR" ;;
   test)

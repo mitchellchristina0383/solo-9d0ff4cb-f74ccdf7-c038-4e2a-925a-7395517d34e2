@@ -73,6 +73,7 @@ def init_db() -> None:
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 receipt_id INTEGER,
                 receipt_at TEXT,
+                receipt_location TEXT,
                 last_error TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -80,6 +81,10 @@ def init_db() -> None:
             )
             """
         )
+        # 旧库平滑升级：补齐 receipt_location 列（hot=接收端热库，archive=已归档历史库）
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(notifications)").fetchall()}
+        if "receipt_location" not in cols:
+            conn.execute("ALTER TABLE notifications ADD COLUMN receipt_location TEXT")
     finally:
         conn.close()
 
@@ -133,12 +138,15 @@ def do_send(nid: int, simulate: str | None = None) -> tuple[int, dict]:
                        last_error=f"接收端不可达或回执丢失（{exc.__class__.__name__}）")
             return 200, fetch_dict(conn, nid)
 
-        # 3) 只有接收端 2xx 回执且内容一致才算送达
+        # 3) 只有接收端 2xx 回执且内容一致才算送达。
+        #    回执可能来自热库，也可能来自已归档的历史库（location=archive），
+        #    同键重传拿到归档原回执同样确认，不要求对端重新入账。
         if resp.status_code in (200, 201):
             receipt = resp.json()
             if receipt.get("content_hash") == row["content_hash"]:
                 set_fields(conn, nid, status=STATUS_ACKED, last_error=None,
-                           receipt_id=receipt.get("id"), receipt_at=receipt.get("received_at"))
+                           receipt_id=receipt.get("id"), receipt_at=receipt.get("received_at"),
+                           receipt_location=receipt.get("location", "hot"))
             else:
                 set_fields(conn, nid, status=STATUS_CONFLICT,
                            last_error="回执内容与本地登记不一致")
@@ -184,7 +192,8 @@ def do_reconcile(nid: int) -> tuple[int, dict]:
             receipt = resp.json()
             if receipt.get("content_hash") == row["content_hash"]:
                 set_fields(conn, nid, status=STATUS_ACKED, last_error=None,
-                           receipt_id=receipt.get("id"), receipt_at=receipt.get("received_at"))
+                           receipt_id=receipt.get("id"), receipt_at=receipt.get("received_at"),
+                           receipt_location=receipt.get("location", "hot"))
             else:
                 set_fields(conn, nid, status=STATUS_CONFLICT,
                            last_error="接收端已存在同环境同发布号的不同内容")

@@ -3,54 +3,207 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>审计接收端 · 回执台账</title>
+<title>审计接收端 · 回执台账与热库归档</title>
 <style>
   body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; margin: 0; background: #f4f6f8; color: #1f2933; }
   header { background: #3e4c59; color: #fff; padding: 14px 24px; }
   header h1 { font-size: 18px; margin: 0; }
   header p { margin: 4px 0 0; font-size: 12px; color: #cbd2d9; }
-  main { max-width: 980px; margin: 20px auto; padding: 0 16px; }
+  main { max-width: 1080px; margin: 20px auto; padding: 0 16px; }
   .card { background: #fff; border: 1px solid #e4e7eb; border-radius: 8px; padding: 16px 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #eef1f4; }
   th { color: #7b8794; font-weight: 600; }
   code { background: #eef1f4; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   .muted { color: #9aa5b1; font-size: 12px; }
+  input[type=text], input[type=datetime-local] { padding: 7px 9px; border: 1px solid #cbd2d9; border-radius: 6px; font-size: 14px; }
+  button { background: #0967d2; color: #fff; border: 0; border-radius: 6px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+  button.ghost { background: #e4e7eb; color: #1f2933; }
+  button.small { padding: 4px 10px; font-size: 12px; }
+  button:disabled { opacity: .55; cursor: default; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .row label { font-size: 13px; color: #52606d; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
+  .b-hot { background: #e3f2fd; color: #0b5cad; }
+  .b-archive { background: #ede7f6; color: #5e35b1; }
+  .b-RUNNING { background: #fff3cd; color: #8a6d1a; }
+  .b-DONE { background: #d9f2e3; color: #1c7c43; }
+  .b-FAILED { background: #fdecea; color: #c0392b; }
+  #msg { margin-top: 10px; font-size: 13px; padding: 8px 10px; border-radius: 6px; display: none; }
+  #msg.ok { display: block; background: #e3f2e9; color: #1c7c43; }
+  #msg.err { display: block; background: #fdecea; color: #c0392b; }
+  label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #8a4b08; }
+  .stat { font-size: 13px; }
+  .stat b { font-size: 16px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>审计接收端 · 回执台账</h1>
-  <p>相同「环境+发布号」的同内容重试只记一次；内容不同返回 409 冲突。本页每 3 秒自动刷新。</p>
+  <h1>审计接收端 · 回执台账与热库归档</h1>
+  <p>相同「环境+发布号」的同内容重试只记一次；内容不同返回 409 冲突。
+     归档把 UTC 截止时间前的旧回执搬入同卷独立 SQLite 库，热库随即收缩；搬迁全程可查、不丢不重。</p>
 </header>
 <main>
   <section class="card">
-    <p class="muted">
-      接口：<code>POST /api/receipts</code>（body 可带 <code>"simulate":"lose_response"</code> 模拟入库后丢响应，
-      或 <code>"slow"</code> 模拟慢回执）· <code>GET /api/receipts?env=...&amp;release_no=...</code> 查询回执
+    <h2>热库归档（按 UTC 截止时间）</h2>
+    <form id="archive-form" class="row">
+      <label>UTC 截止时间
+        <input type="datetime-local" id="cutoff" step="1" required>
+      </label>
+      <button type="submit">归档截止时间前的回执</button>
+      <label class="chk"><input type="checkbox" id="arch-sim"> 故障注入：复制进归档库后、热库删除前失败（演示恢复）</label>
+    </form>
+    <div id="msg"></div>
+    <p class="muted stat" style="margin-top:10px">
+      热库现存 <b id="hot-count">–</b> 条 · 归档库 <b id="archive-count">–</b> 条
+      （归档库：<code id="archive-db">–</code>，与热库位于同一数据卷）
     </p>
-    <table>
-      <thead><tr><th>ID</th><th>环境</th><th>发布号</th><th>结果</th><th>入账时间 (UTC)</th></tr></thead>
+  </section>
+
+  <section class="card">
+    <h2>按环境 + 发布号查回执（热库优先，未命中自动查归档库）</h2>
+    <form id="query-form" class="row">
+      <label>环境 <input type="text" id="q-env" value="prod" maxlength="64"></label>
+      <label>发布号 <input type="text" id="q-rel" placeholder="如 R2026-001" maxlength="64"></label>
+      <button type="submit">查询</button>
+    </form>
+    <div id="query-result" class="muted" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">回执台账（热库 + 归档库去重合并）</h2>
+      <button class="ghost small" id="btn-refresh">刷新</button>
+    </div>
+    <table style="margin-top:10px">
+      <thead><tr><th>ID</th><th>环境</th><th>发布号</th><th>结果</th><th>位置</th><th>入账时间 (UTC)</th><th>归档时间 (UTC)</th></tr></thead>
       <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>归档任务结果</h2>
+    <table>
+      <thead><tr><th>任务#</th><th>UTC 截止时间</th><th>状态</th><th>已归档/总数</th><th>最近错误</th><th>更新时间 (UTC)</th><th>操作</th></tr></thead>
+      <tbody id="jobs"></tbody>
     </table>
   </section>
 </main>
 <script>
-function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
-async function load() {
-  const r = await fetch("/api/receipts");
-  const data = await r.json();
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  return { status: r.status, data };
+}
+function showMsg(text, ok) {
+  const el = document.getElementById("msg");
+  el.textContent = text;
+  el.className = ok ? "ok" : "err";
+}
+
+async function loadStats() {
+  const { data } = await api("/api/archive/stats");
+  if (data.hot !== undefined) {
+    document.getElementById("hot-count").textContent = data.hot;
+    document.getElementById("archive-count").textContent = data.archive;
+    document.getElementById("archive-db").textContent = data.archive_db;
+  }
+}
+
+async function loadReceipts() {
+  const { data } = await api("/api/receipts");
   const tbody = document.getElementById("rows");
   tbody.innerHTML = "";
   for (const n of (data.items || [])) {
     const tr = document.createElement("tr");
+    const loc = n.location === "archive"
+      ? '<span class="badge b-archive">归档库</span>'
+      : '<span class="badge b-hot">热库</span>';
     tr.innerHTML = "<td>" + n.id + "</td><td>" + esc(n.env) + "</td><td>" + esc(n.release_no) +
-      "</td><td>" + esc(n.result) + "</td><td class='muted'>" + esc(n.received_at) + "</td>";
+      "</td><td>" + esc(n.result) + "</td><td>" + loc +
+      "</td><td class='muted'>" + esc(n.received_at) +
+      "</td><td class='muted'>" + esc(n.archived_at || "") + "</td>";
     tbody.appendChild(tr);
   }
 }
-load();
-setInterval(load, 3000);
+
+async function loadJobs() {
+  const { data } = await api("/api/archive/jobs");
+  const tbody = document.getElementById("jobs");
+  tbody.innerHTML = "";
+  for (const j of (data.items || [])) {
+    const tr = document.createElement("tr");
+    const label = { RUNNING: "执行中", DONE: "完成", FAILED: "失败" }[j.status] || j.status;
+    tr.innerHTML = "<td>" + j.id + "</td><td class='muted'>" + esc(j.cutoff) +
+      '</td><td><span class="badge b-' + j.status + '">' + label + "</span></td>" +
+      "<td>" + j.archived + " / " + j.total + "</td>" +
+      "<td class='muted'>" + esc(j.last_error || "") + "</td>" +
+      "<td class='muted'>" + esc(j.updated_at) + "</td><td></td>";
+    if (j.status === "FAILED") {
+      const btn = document.createElement("button");
+      btn.className = "small";
+      btn.textContent = "重试/续做";
+      btn.onclick = async () => {
+        btn.disabled = true;
+        const r = await api(`/api/archive/jobs/${j.id}/retry`, { method: "POST" });
+        if (r.status === 200) showMsg("任务 #" + j.id + " 已收敛完成，共归档 " + r.data.archived + " 条", true);
+        else showMsg("任务 #" + j.id + " 仍失败：" + (r.data.detail || ""), false);
+        refreshAll();
+      };
+      tr.lastElementChild.appendChild(btn);
+    }
+    tbody.appendChild(tr);
+  }
+}
+
+function refreshAll() { loadStats(); loadReceipts(); loadJobs(); }
+
+document.getElementById("archive-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const raw = document.getElementById("cutoff").value;
+  if (!raw) { showMsg("请选择 UTC 截止时间", false); return; }
+  const body = { cutoff: raw.endsWith("Z") || raw.includes("+") ? raw : raw + "Z", wait: true };
+  if (document.getElementById("arch-sim").checked) body.simulate = "fail_after_copy";
+  const btn = e.target.querySelector("button");
+  btn.disabled = true;
+  const r = await api("/api/archive/jobs", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  btn.disabled = false;
+  if (r.status === 200 && r.data.status === "DONE") {
+    showMsg("归档完成：任务 #" + r.data.id + " 共归档 " + r.data.archived + " 条，热库已不再存放这些回执", true);
+  } else if (r.status === 409) {
+    showMsg("已有归档任务在执行：#" + r.data.job_id, false);
+  } else {
+    showMsg("归档未完成（不会误报；已复制回执可查，可在任务表点重试）：" + (r.data.detail || JSON.stringify(r.data)), false);
+  }
+  refreshAll();
+};
+
+document.getElementById("query-form").onsubmit = async (e) => {
+  e.preventDefault();
+  const env = encodeURIComponent(document.getElementById("q-env").value.trim());
+  const rel = encodeURIComponent(document.getElementById("q-rel").value.trim());
+  const out = document.getElementById("query-result");
+  if (!env || !rel) { out.textContent = "环境与发布号均不能为空"; return; }
+  const r = await api(`/api/receipts?env=${env}&release_no=${rel}`);
+  if (r.status === 404) { out.textContent = "热库与归档库均无此记录（404）"; return; }
+  if (r.status >= 400) { out.textContent = "查询失败：" + (r.data.detail || r.status); return; }
+  const n = r.data;
+  const loc = n.location === "archive" ? "归档库" : "热库";
+  out.innerHTML = "命中（" + loc + "）：ID=" + n.id + " · 环境=" + esc(n.env) +
+    " · 发布号=" + esc(n.release_no) + " · 结果=" + esc(n.result) +
+    " · content_hash=" + esc(n.content_hash).slice(0, 16) + "…" +
+    " · 入账=" + esc(n.received_at) +
+    (n.archived_at ? " · 归档=" + esc(n.archived_at) : "");
+};
+
+document.getElementById("btn-refresh").onclick = refreshAll;
+refreshAll();
+setInterval(refreshAll, 4000);
 </script>
 </body>
 </html>

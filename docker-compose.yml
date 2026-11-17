@@ -8,6 +8,8 @@ services:
       - "8001:8001"
     environment:
       DB_PATH: /data/receiver.db
+      # 归档库与热库同处 receiver_data 这一命名卷内
+      ARCHIVE_DB_PATH: /data/archive.db
     volumes:
       - receiver_data:/data
     restart: unless-stopped
